@@ -286,12 +286,3 @@ deploy/homeassistant.yaml   shell_command + автоматизация для HA
 deploy/Dockerfile           самодостаточный контейнер со своим cron
 deploy/docker-compose.yml   запуск контейнера
 ```
-
-## Секреты
-
-В репозиторий не попадают (см. `.gitignore`): `.env`, `config.json`,
-`cookies.pkl`, `*.html`, `*.log`. Первые два есть в виде шаблонов
-`.env.example` и `config.example.json`.
-
-Дампы страниц, которые скрипт сохраняет при ошибках (`login_failed.html`,
-`authorize_failed.html`), содержат antiforgery-токены — тоже под `.gitignore`.
