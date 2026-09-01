@@ -30,7 +30,7 @@ import pickle
 import re
 import sys
 import time
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -214,10 +214,12 @@ class EircClient:
     # ------------------------------------------------------------------ auth
 
     def is_authenticated(self):
-        """Аутентифицированный /SN отдаёт 200, неаутентифицированный — 302 на id."""
+        """Залогинены = /SN отдал 200 и на нём есть карточки лицевых счетов.
+        """
         r = self.s.get(BASE_LK + "/SN", allow_redirects=False, timeout=self.timeout)
-        return (not r.is_redirect) and r.status_code == 200 \
-            and "__RequestVerificationToken" in r.text
+        if r.is_redirect or r.status_code != 200:
+            return False
+        return bool(self.accounts(r.text))
 
     def ensure_login(self):
         if self.is_authenticated():
@@ -225,7 +227,19 @@ class EircClient:
             return
         self.authenticate()
 
+    def _reset_cookies(self):
+        """Полный сброс банки перед логином.
+
+        .AspNetCore.Cookies чанкуется в C1/C2. Если сервер выдаст вариант
+        с другим числом чанков, лишние куски останутся в банке и продолжат
+        уезжать на сервер: ticket не расшифруется, а состояние переживёт
+        и перезапуск (лежит в pickle), и релогин.
+        """
+        self.s.cookies.clear()
+        log.debug("Банка кук очищена перед логином")
+
     def authenticate(self):
+        self._reset_cookies()
         log.info("=== Шаг 1: инициируем OIDC с lk (получаем Correlation/Nonce) ===")
         # /SN сам по себе редиректит на лендинг lk/Home/Index/1, а не на id.
         # OIDC-челлендж запускает отдельный эндпоинт — ссылка "Войти" на лендинге.
@@ -329,8 +343,11 @@ class EircClient:
         r = self.s.get(BASE_LK + "/SN", headers={"Referer": BASE_LK + "/"},
                        timeout=self.timeout)
         r.raise_for_status()
-        if "/Auth/Login" in r.url:
-            raise EircError("Редирект на логин — сессия невалидна")
+        # Без сессии /SN уводит на лендинг lk/Home/Index/1, а не на /Auth/Login,
+        # поэтому проверять надо не имя формы логина, а то, что мы всё ещё на /SN.
+        if not urlparse(r.url).path.rstrip("/").endswith("/SN"):
+            raise EircError("С /SN перебросило на %s — сессия невалидна"
+                            % _short(r.url))
         return r.text
 
     @staticmethod
@@ -360,9 +377,18 @@ class EircClient:
 
     def open_indications(self, account=None):
         """Страница ввода показаний конкретного лицевого счёта."""
-        accs = self.accounts(self.open_sn())
+        html = self.open_sn()
+        accs = self.accounts(html)
         if not accs:
-            raise EircError("На /SN не нашёл ни одного лицевого счёта")
+            log.warning("На /SN нет лицевых счетов — пробую перелогиниться")
+            _dump("sn_empty.html", html)
+            self.authenticate()
+            html = self.open_sn()
+            accs = self.accounts(html)
+        if not accs:
+            _dump("sn_empty.html", html)
+            raise EircError("На /SN не нашёл ни одного лицевого счёта даже "
+                            "после релогина — страница в sn_empty.html")
         if account:
             match = [a for a in accs if a["accountNumber"] == str(account)]
             if not match:
