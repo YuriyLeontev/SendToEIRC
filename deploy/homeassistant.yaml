@@ -1,6 +1,6 @@
-# SendEIRC в Home Assistant: подача по расписанию + уведомления.
+# SendToEIRC в Home Assistant: подача по расписанию + уведомления.
 #
-# Скрипт лежит в /config/sendeirc. Если в контейнере HA нет beautifulsoup4,
+# Скрипт лежит в /config/SendToEIRC. Если в контейнере HA нет beautifulsoup4,
 # запускайте через отдельный контейнер (deploy/docker-compose.yml) или
 # add-on «Advanced SSH & Web Terminal» с обычным cron.
 #
@@ -12,7 +12,7 @@
 #
 #   notify.ВАШ_TELEGRAM          -> ваша сущность Telegram
 #   notify.mobile_app_ВАШ_ТЕЛЕФОН -> ваш телефон в приложении HA
-#   /config/sendeirc             -> путь, куда положили скрипт
+#   /config/SendToEIRC             -> путь, куда положили скрипт
 #
 # Имена сервисов: Средства разработчика → Действия → набрать notify.
 # ───────────────────────────────────────────────────────────────
@@ -27,18 +27,39 @@
 # --days:    подстраховка, если автоматизация сработает не в тот день.
 # cd:        обязателен, скрипт читает .env и config.json из CWD.
 
+# ОБЯЗАТЕЛЬНА обёртка /bin/sh -c '...'
+#
+# Если в команде нет шаблона {{ }}, HA НЕ запускает шелл: он делает
+# shlex.split и вызывает программу напрямую (create_subprocess_exec).
+# Тогда `cd` ищется как бинарник /bin/cd, которого не существует, —
+# и получается returncode 1 с пустыми stdout и stderr.
+# По той же причине без обёртки не работают && | > >> 2>>.
+#
+# Используем /bin/sh, а не bash: контейнер HA на Alpine, bash там может
+# отсутствовать.
+
 shell_command:
   # Боевая: реально отправляет показания
   send_eirc: >-
-    cd /config/sendeirc &&
-    python3 eirc.py --summary --days 1-25 2>> /config/sendeirc/eirc.log
+    sh -c 'cd /config/SendToEIRC &&
+    python3 eirc.py --summary --days 1-25 2>> /config/SendToEIRC/eirc.log'
 
   # Тестовая: проходит весь путь (логин, Waviot, сбор payload),
   # но НЕ отправляет. Даёт такой же stdout, как боевая, — на ней
   # и проверяют уведомления. Без --days, чтобы работала в любой день.
   send_eirc_test: >-
-    cd /config/sendeirc &&
-    python3 eirc.py --summary --dry-run 2>> /config/sendeirc/eirc.log
+    sh -c 'cd /config/SendToEIRC &&
+    python3 eirc.py --summary --dry-run 2>> /config/SendToEIRC/eirc.log'
+
+  # Диагностика среды: версия Python, наличие зависимостей, список файлов
+  eirc_diag: >-
+    sh -c 'cd /config/SendToEIRC &&
+    python3 -c "import sys,bs4,requests;print(sys.version)" &&
+    ls -a'
+
+  # Диагностика сети: за сколько сервер HA достучится до ЕИРЦ и Waviot
+  eirc_net: >-
+    sh -c 'cd /config/SendToEIRC && python3 eirc.py --net-check'
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -95,7 +116,7 @@ shell_command:
 
               {{ result.stdout if result.stdout else 'Код возврата ' ~ result.returncode }}
 
-              Лог: /config/sendeirc/eirc.log
+              Лог: /config/SendToEIRC/eirc.log
         - action: notify.mobile_app_ВАШ_ТЕЛЕФОН
           data:
             title: "⚠️ ЕИРЦ: подача не прошла"
@@ -125,7 +146,7 @@ shell_command:
 #   ⚠️ ЕИРЦ: подача не прошла
 #   ОШИБКА ЕИРЦ: Счётчик 00000000 день: новое показание 1230
 #   МЕНЬШЕ уже поданного 1234.000
-#   Лог: /config/sendeirc/eirc.log
+#   Лог: /config/SendToEIRC/eirc.log
 
 
 # ═══════════════════════════════════════════════════════════════

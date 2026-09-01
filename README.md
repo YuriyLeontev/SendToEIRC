@@ -195,8 +195,16 @@ stdout начинается с `SKIP` — такие запуски можно �
 
 ```yaml
 shell_command:
-  send_eirc: "cd /config/sendeirc && python3 eirc.py --summary --days 1-25 2>> eirc.log"
+  send_eirc: >-
+    /bin/sh -c 'cd /config/sendeirc &&
+    python3 eirc.py --summary --days 1-25 2>> /config/sendeirc/eirc.log'
 ```
+
+Обёртка `/bin/sh -c` обязательна. Если в команде нет шаблона `{{ }}`,
+HA не запускает шелл: он делает `shlex.split` и вызывает программу
+напрямую. Тогда `cd` ищется как несуществующий бинарник `/bin/cd`,
+и получается `returncode 1` с пустыми `stdout` и `stderr`. По той же
+причине без обёртки не работают `&&`, `|` и `2>>`.
 
 ```yaml
 actions:
