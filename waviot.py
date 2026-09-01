@@ -65,7 +65,7 @@ def _fmt_ts(ts, tz_name="Europe/Moscow"):
     return datetime.datetime.fromtimestamp(int(ts), tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def apply_rounding(value, mode="floor"):
+def apply_rounding(value, mode="ceil"):
     """Waviot отдаёт 123.4560, а в ЕИРЦ подают целые кВт·ч.
 
     floor  — отбросить дробную часть (по умолчанию: не завышаем расход)
