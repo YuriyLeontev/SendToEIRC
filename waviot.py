@@ -65,11 +65,17 @@ def _fmt_ts(ts, tz_name="Europe/Moscow"):
     return datetime.datetime.fromtimestamp(int(ts), tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def apply_rounding(value, mode="ceil"):
+# Режим округления по умолчанию. Живёт здесь в одном экземпляре: eirc.py
+# берёт его же как fallback, чтобы правка в одном месте не осталась
+# незамеченной из-за дубля в другом.
+DEFAULT_ROUNDING = "ceil"
+
+
+def apply_rounding(value, mode=DEFAULT_ROUNDING):
     """Waviot отдаёт 123.4560, а в ЕИРЦ подают целые кВт·ч.
 
-    floor  — отбросить дробную часть (по умолчанию: не завышаем расход)
-    ceil   — вверх
+    floor  — отбросить дробную часть
+    ceil   — вверх (по умолчанию)
     round  — арифметически
     raw    — как есть
     целое N — округлить до N знаков
