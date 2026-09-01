@@ -35,7 +35,8 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from waviot import WaviotClient, WaviotError, apply_rounding
+from waviot import (WaviotClient, WaviotError, apply_rounding,
+                    DEFAULT_ROUNDING)
 
 BASE_ID = "https://id.epd47.ru"
 BASE_LK = "https://lk.epd47.ru"
@@ -467,7 +468,7 @@ class EircClient:
                         "Счётчик %s настроен на register=%r, но клиент Waviot не создан "
                         "— задайте WAVIOT_ID и WAVIOT_KEY в .env" % (key, rd["register"]))
                 got = waviot.value(rd["register"], rd.get("serial"))
-                val = apply_rounding(got["value"], rd.get("round", "floor"))
+                val = apply_rounding(got["value"], rd.get("round", DEFAULT_ROUNDING))
                 source = "Waviot %s=%s (%s)" % (got["register"], got["value"], got["time"])
             elif "val" in rd:
                 val = str(rd["val"])
