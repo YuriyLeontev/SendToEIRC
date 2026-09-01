@@ -29,6 +29,7 @@ import os
 import pickle
 import re
 import sys
+import time
 from urllib.parse import urljoin
 
 import requests
@@ -54,8 +55,34 @@ class EircError(RuntimeError):
     pass
 
 
+def _mount_retries(session, retries=3, backoff=2.0):
+    """Повторные попытки при обрывах и таймаутах.
+
+    Сервер ЕИРЦ отвечает нестабильно, а задача крутится по расписанию —
+    разовый сетевой сбой не должен ронять подачу.
+
+    Повторяются только идемпотентные методы (GET/HEAD/OPTIONS) — так
+    POST /SN/Result не отправится дважды. Паузы: 0, 2, 4 секунды.
+    """
+    if not retries:
+        return
+    try:
+        from urllib3.util.retry import Retry
+    except ImportError:                                  # очень старый urllib3
+        return
+    retry = Retry(
+        total=retries, connect=retries, read=retries,
+        backoff_factor=backoff,
+        status_forcelist=(429, 500, 502, 503, 504),
+        raise_on_status=False,
+    )
+    adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+
 class EircClient:
-    def __init__(self, login, password, cookie_file=None, timeout=30):
+    def __init__(self, login, password, cookie_file=None, timeout=60, retries=3):
         self.login_name = login
         self.password = password
         self.cookie_file = cookie_file
@@ -69,6 +96,7 @@ class EircClient:
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
             "Upgrade-Insecure-Requests": "1",
         })
+        _mount_retries(self.s, retries)
         self._load_cookies()
 
     # ------------------------------------------------------------------ utils
@@ -396,6 +424,7 @@ class EircClient:
         by_name = {c["counterName"]: c for c in found}
 
         model = []
+        blocked = []
         for rd in readings:
             key = str(rd.get("counterId") or rd.get("counterName") or "")
             c = by_id.get(key) or by_name.get(key)
@@ -431,23 +460,32 @@ class EircClient:
                     "register (Waviot), val или increment" % key)
 
             # Счётчик не может крутиться назад: ЕИРЦ отвергнет такое показание.
+            # Проблемы копим по всем счётчикам, а не падаем на первом —
+            # иначе из отчёта не видно, что творится с остальными.
             try:
                 prev, new = float((c["last"] or "0").replace(",", ".")), float(val)
             except ValueError:
                 prev = new = None
             if prev is not None and new < prev:
-                msg = ("Счётчик %s (%s): новое показание %s МЕНЬШЕ уже поданного %s. "
-                       % (c["counterName"], c["counterId"], val, c["last"]))
-                if not allow_decrease:
-                    raise EircError(
-                        msg + "ЕИРЦ такое обычно отвергает. Если уверены — "
-                              "запустите с --allow-decrease")
-                log.warning(msg + "Отправляю, так как задан --allow-decrease")
+                msg = ("%s: %s меньше уже поданного %s"
+                       % (c["counterName"], val, c["last"]))
+                if allow_decrease:
+                    log.warning("%s — отправляю, задан --allow-decrease", msg)
+                else:
+                    blocked.append(msg)
 
             log.info("%s %s (%s): последнее %s -> подаём %s   [%s]",
                      c["serviceTypeName"], c["counterNumber"], c["counterId"],
                      c["last"] or "?", val, source)
             model.append(dict(c, val=val))
+
+        if blocked:
+            raise EircError(
+                "Показания меньше уже поданных, ЕИРЦ такое обычно отвергает:\n  "
+                + "\n  ".join(blocked)
+                + "\nВсего счётчиков: %d, из них с проблемой: %d. "
+                  "Если уверены — запустите с --allow-decrease"
+                  % (len(model), len(blocked)))
 
         token = self.antiforgery(html)
         payload = {"__RequestVerificationToken": token}
@@ -530,8 +568,19 @@ def main():
                    help="Работать только с N по M число месяца (например 1-25). "
                         "Вне диапазона — выйти без подачи. Подстраховка на случай, "
                         "если расписание сработает не в тот день")
+    p.add_argument("--timeout", type=int,
+                   default=int(os.environ.get("EIRC_TIMEOUT") or 0) or None,
+                   help="Таймаут одного HTTP-запроса, сек (по умолчанию 60). "
+                        "Увеличьте, если сервер отвечает медленно")
+    p.add_argument("--retries", type=int,
+                   default=int(os.environ.get("EIRC_RETRIES") or -1),
+                   help="Сколько раз повторять при таймауте или обрыве "
+                        "(по умолчанию 3, 0 — не повторять)")
     p.add_argument("--allow-decrease", action="store_true",
                    help="Разрешить подачу показания меньше уже поданного")
+    p.add_argument("--net-check", action="store_true",
+                   help="Проверить доступность и время отклика ЕИРЦ и Waviot, "
+                        "ничего не подавая. Для диагностики медленной сети")
     p.add_argument("--meter", action="store_true",
                    help="Показать реальные показания со счётчика Waviot и выйти")
     p.add_argument("--dry-run", action="store_true",
@@ -560,6 +609,35 @@ def main():
         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
 
     _load_dotenv()
+
+    if args.net_check:
+        timeout = args.timeout or 90
+        hosts = ("https://lk.epd47.ru/", "https://id.epd47.ru/",
+                 "https://lk.waviot.ru/")
+        worst = 0.0
+        bad = False
+        for u in hosts:
+            t0 = time.time()
+            try:
+                r = requests.get(u, timeout=timeout,
+                                 headers={"User-Agent": UA})
+                dt = time.time() - t0
+                worst = max(worst, dt)
+                print("%-26s %s  %.1f сек" % (u, r.status_code, dt))
+            except requests.RequestException as e:
+                bad = True
+                print("%-26s ОШИБКА %s  %.1f сек"
+                      % (u, type(e).__name__, time.time() - t0))
+        if bad:
+            print("\nЕсть недоступные хосты — проверьте сеть и DNS сервера.")
+            return 1
+        print("\nСамый медленный ответ: %.1f сек." % worst)
+        if worst > 20:
+            print("Это много. Поставьте timeout не меньше %d сек в config.json."
+                  % (int(worst * 3) + 10))
+        else:
+            print("Штатного таймаута 60 сек хватает с запасом.")
+        return 0
 
     if args.days:
         m = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s*$", args.days)
@@ -594,7 +672,8 @@ def main():
     wv_id = os.environ.get("WAVIOT_ID") or cfg.get("waviot_id")
     wv_key = os.environ.get("WAVIOT_KEY") or cfg.get("waviot_key")
     if wv_id and wv_key:
-        wv = WaviotClient(wv_id, wv_key)
+        wv = WaviotClient(wv_id, wv_key,
+                          timeout=args.timeout or cfg.get("timeout") or 60)
 
     if args.meter:
         if wv is None:
@@ -605,10 +684,16 @@ def main():
                   % (r["serial"], r["register"], r["value"], r["time"]))
         return 0
 
+    timeout = args.timeout or cfg.get("timeout") or 60
+    retries = args.retries if args.retries >= 0 else cfg.get("retries", 3)
+    log.debug("Таймаут %s сек, повторов %s", timeout, retries)
+
     client = EircClient(
         login=login,
         password=password,
         cookie_file=cfg.get("cookie_file", "cookies.pkl"),
+        timeout=timeout,
+        retries=retries,
     )
 
     try:
