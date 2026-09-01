@@ -1,0 +1,15 @@
+services:
+  sendeirc:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: sendeirc
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Moscow
+    volumes:
+      # Секреты и конфиг не вшиты в образ — монтируются снаружи
+      - ../.env:/app/.env:ro
+      - ../config.json:/app/config.json:ro
+      # cookies.pkl должен переживать перезапуск, поэтому не :ro
+      - ./data:/app/data
