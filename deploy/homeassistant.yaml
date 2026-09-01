@@ -1,0 +1,197 @@
+# SendEIRC в Home Assistant: подача по расписанию + уведомления.
+#
+# Скрипт лежит в /config/sendeirc. Если в контейнере HA нет beautifulsoup4,
+# запускайте через отдельный контейнер (deploy/docker-compose.yml) или
+# add-on «Advanced SSH & Web Terminal» с обычным cron.
+#
+# Проверить зависимости:
+#   docker exec homeassistant python3 -c "import bs4, requests; print('ok')"
+#
+# ───────────────────────────────────────────────────────────────
+# ПЕРЕД ИСПОЛЬЗОВАНИЕМ ЗАМЕНИТЕ ПЛЕЙСХОЛДЕРЫ:
+#
+#   notify.ВАШ_TELEGRAM          -> ваша сущность Telegram
+#   notify.mobile_app_ВАШ_ТЕЛЕФОН -> ваш телефон в приложении HA
+#   /config/sendeirc             -> путь, куда положили скрипт
+#
+# Имена сервисов: Средства разработчика → Действия → набрать notify.
+# ───────────────────────────────────────────────────────────────
+
+
+# ═══════════════════════════════════════════════════════════════
+# configuration.yaml
+# ═══════════════════════════════════════════════════════════════
+#
+# --summary: в stdout уходит только короткий текст для уведомления,
+#            весь лог идёт в stderr и дальше в файл.
+# --days:    подстраховка, если автоматизация сработает не в тот день.
+# cd:        обязателен, скрипт читает .env и config.json из CWD.
+
+shell_command:
+  # Боевая: реально отправляет показания
+  send_eirc: >-
+    cd /config/sendeirc &&
+    python3 eirc.py --summary --days 1-25 2>> /config/sendeirc/eirc.log
+
+  # Тестовая: проходит весь путь (логин, Waviot, сбор payload),
+  # но НЕ отправляет. Даёт такой же stdout, как боевая, — на ней
+  # и проверяют уведомления. Без --days, чтобы работала в любой день.
+  send_eirc_test: >-
+    cd /config/sendeirc &&
+    python3 eirc.py --summary --dry-run 2>> /config/sendeirc/eirc.log
+
+
+# ═══════════════════════════════════════════════════════════════
+# automations.yaml
+# ═══════════════════════════════════════════════════════════════
+#
+# Успех  -> только Telegram, чтобы не будить телефон пушем каждый вечер.
+# Ошибка -> Telegram + push с priority high: её нужно заметить.
+#
+# notify.send_message не поддерживает title — заголовок идёт первой
+# строкой message.
+
+- id: send_eirc_daily
+  alias: ЕИРЦ — подача показаний
+  description: С 1 по 25 число в 23:50 подаёт показания и шлёт результат
+  triggers:
+    - trigger: time
+      at: "23:50:00"
+  conditions:
+    - condition: template
+      value_template: "{{ now().day <= 25 }}"
+  actions:
+    - action: shell_command.send_eirc
+      response_variable: result
+
+    - choose:
+        # Скрипт сам пропустил день (вне диапазона --days) — молчим
+        - conditions:
+            - condition: template
+              value_template: "{{ result.stdout is search('^SKIP') }}"
+          sequence: []
+
+        # Успех — только Telegram
+        - conditions:
+            - condition: template
+              value_template: "{{ result.returncode == 0 }}"
+          sequence:
+            - action: notify.send_message
+              target:
+                entity_id: notify.ВАШ_TELEGRAM
+              data:
+                # stdout уже начинается со строки «ЕИРЦ: показания переданы»,
+                # поэтому свой заголовок не добавляем — только значок
+                message: "✅ {{ result.stdout }}"
+
+      # Ошибка — Telegram и push
+      default:
+        - action: notify.send_message
+          target:
+            entity_id: notify.ВАШ_TELEGRAM
+          data:
+            message: >-
+              ⚠️ ЕИРЦ: подача не прошла
+
+              {{ result.stdout if result.stdout else 'Код возврата ' ~ result.returncode }}
+
+              Лог: /config/sendeirc/eirc.log
+        - action: notify.mobile_app_ВАШ_ТЕЛЕФОН
+          data:
+            title: "⚠️ ЕИРЦ: подача не прошла"
+            message: >-
+              {{ result.stdout if result.stdout else 'Код возврата ' ~ result.returncode }}
+            data:
+              priority: high
+              ttl: 0
+  mode: single
+
+
+# ═══════════════════════════════════════════════════════════════
+# Что придёт
+# ═══════════════════════════════════════════════════════════════
+#
+# Успех, в Telegram:
+#
+#   ✅ ЕИРЦ: показания переданы
+#
+#   ЕИРЦ: показания переданы
+#   Лицевой счёт 000000000000
+#   00000000 день: 1234.000 -> 1240
+#   00000000 ночь: 567.000 -> 570
+#
+# Ошибка, в Telegram и пушем:
+#
+#   ⚠️ ЕИРЦ: подача не прошла
+#   ОШИБКА ЕИРЦ: Счётчик 00000000 день: новое показание 1230
+#   МЕНЬШЕ уже поданного 1234.000
+#   Лог: /config/sendeirc/eirc.log
+
+
+# ═══════════════════════════════════════════════════════════════
+# ТЕСТОВАЯ АВТОМАТИЗАЦИЯ — та же логика, но через send_eirc_test
+# ═══════════════════════════════════════════════════════════════
+#
+# Ничего не отправляет в ЕИРЦ, зато проверяет всю цепочку целиком:
+# запуск скрипта, разбор результата, уведомления.
+# Триггера нет — запускается только вручную кнопкой «Запустить».
+# Когда убедитесь, что всё работает, эту автоматизацию можно удалить.
+
+- id: send_eirc_test
+  alias: ЕИРЦ — ТЕСТ (без отправки)
+  description: Ручная проверка цепочки, показания не отправляются
+  triggers: []
+  conditions: []
+  actions:
+    - action: shell_command.send_eirc_test
+      response_variable: result
+
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ result.returncode == 0 }}"
+          sequence:
+            - action: notify.send_message
+              target:
+                entity_id: notify.ВАШ_TELEGRAM
+              data:
+                message: "🧪 ТЕСТ\n{{ result.stdout }}"
+      default:
+        - action: notify.send_message
+          target:
+            entity_id: notify.ВАШ_TELEGRAM
+          data:
+            message: >-
+              🧪 ТЕСТ — ошибка
+
+              {{ result.stdout if result.stdout else 'Код возврата ' ~ result.returncode }}
+  mode: single
+
+
+# ═══════════════════════════════════════════════════════════════
+# Порядок проверки
+# ═══════════════════════════════════════════════════════════════
+#
+# 0. Есть ли в контейнере HA нужные пакеты:
+#      docker exec homeassistant python3 -c "import bs4, requests; print('ok')"
+#    Если ImportError — ставьте отдельный контейнер (docker-compose.yml)
+#    или add-on «Advanced SSH & Web Terminal» с cron.
+#
+# 1. Применить конфиг БЕЗ перезапуска HA:
+#      Средства разработчика → YAML → Проверить конфигурацию
+#      Средства разработчика → YAML → Перезагрузить всю конфигурацию YAML
+#    Полный рестарт нужен, только если правите telegram_bot.
+#
+# 2. Проверить, что бот пишет:
+#      Средства разработчика → Действия → notify.send_message
+#      target: notify.ВАШ_TELEGRAM, message: проверка
+#
+# 3. Проверить сам скрипт (ничего не отправит):
+#      Средства разработчика → Действия → shell_command.send_eirc_test
+#      Режим YAML → «Выполнить» → в ответе будут stdout и returncode.
+#
+# 4. Проверить цепочку целиком:
+#      Настройки → Автоматизации → «ЕИРЦ — ТЕСТ» → Запустить
+#      В Telegram должно прийти сообщение с 🧪.
+#
+# 5. Только после этого включать боевую автоматизацию.

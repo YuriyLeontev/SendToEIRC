@@ -1,0 +1,21 @@
+{
+  "_readme": "Скопируйте в config.json и заполните. config.json в .gitignore. Логин, пароль и ключи Waviot держите в .env.",
+  "cookie_file": "cookies.pkl",
+  "_account": "Номер лицевого счёта. Узнать: python eirc.py --list. Можно опустить, если счёт один.",
+  "account": "000000000000",
+  "_readings": "Источник значения — один из трёх: register (реальное показание со счётчика Waviot), val (абсолютное число), increment (прибавка к последнему поданному). register принимает псевдонимы день/ночь/сумма или полное имя регистратора (electro_ac_p_lsum_t1). round: floor (по умолчанию) / ceil / round / raw / число знаков.",
+  "readings": [
+    {
+      "counterId": "0000000000000",
+      "_имя": "НОМЕР день",
+      "register": "день",
+      "round": "floor"
+    },
+    {
+      "counterId": "0000000000001",
+      "_имя": "НОМЕР ночь",
+      "register": "ночь",
+      "round": "floor"
+    }
+  ]
+}
