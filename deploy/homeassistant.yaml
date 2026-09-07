@@ -61,6 +61,27 @@ shell_command:
   eirc_net: >-
     sh -c 'cd /config/SendToEIRC && python3 eirc.py --net-check'
 
+  # Второй адресат — ЛК Петроэлектросбыт (ikus.pesc.ru). Отдельная команда,
+  # а не флаг к eirc.py: кабинеты независимы, и недоступность одного не
+  # должна отменять подачу во второй.
+  #
+  # ВАЖНО: перед первым запуском один раз выполните в терминале
+  #   cd /config/SendToEIRC && python3 pesc.py --setup
+  # Придёт код подтверждения (SMS/письмо), после чего в pesc_tokens.json
+  # ляжет токен verified и второй фактор больше не спрашивается.
+  # Из HA это не сделать — код нужно вводить руками.
+  # Без --days: в ПЭС подаём каждый день. Это самовосстановление — упала
+  # сеть или сервер, завтрашний запуск подхватит. А открыт ли приём,
+  # скрипт спрашивает у кабинета (reading/period) и при forbidden не
+  # отправляет, так что календарь тут не нужен.
+  send_pesc: >-
+    sh -c 'cd /config/SendToEIRC &&
+    python3 pesc.py --summary 2>> /config/SendToEIRC/eirc.log'
+
+  send_pesc_test: >-
+    sh -c 'cd /config/SendToEIRC &&
+    python3 pesc.py --summary --dry-run 2>> /config/SendToEIRC/eirc.log'
+
 
 # ═══════════════════════════════════════════════════════════════
 # automations.yaml
@@ -120,6 +141,64 @@ shell_command:
         - action: notify.mobile_app_ВАШ_ТЕЛЕФОН
           data:
             title: "⚠️ ЕИРЦ: подача не прошла"
+            message: >-
+              {{ result.stdout if result.stdout else 'Код возврата ' ~ result.returncode }}
+            data:
+              priority: high
+              ttl: 0
+  mode: single
+
+
+# ───────────────────────────────────────────────────────────────
+# То же самое для ПЭС, отдельной автоматизацией на 23:45.
+#
+# Логика один в один, только shell_command другой. Разделены намеренно:
+# если ПЭС лежит, показания в ЕИРЦ всё равно уйдут, и наоборот — в
+# уведомлении сразу видно, какой кабинет не принял.
+#
+# Если verified протухнет, скрипт напишет «выполните python pesc.py
+# --setup» — это придёт обычным уведомлением об ошибке.
+# ───────────────────────────────────────────────────────────────
+
+- id: send_pesc_daily
+  alias: ПЭС — подача показаний
+  description: Каждый день в 23:45 подаёт показания в Петроэлектросбыт
+  triggers:
+    - trigger: time
+      at: "23:45:00"
+  # Условия по числу месяца нет намеренно: приём показаний проверяет сам
+  # скрипт, спрашивая кабинет. Ветки SKIP тоже нет — она нужна только
+  # при --days, а его здесь не осталось.
+  conditions: []
+  actions:
+    - action: shell_command.send_pesc
+      response_variable: result
+
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ result.returncode == 0 }}"
+          sequence:
+            - action: notify.send_message
+              target:
+                entity_id: notify.ВАШ_TELEGRAM
+              data:
+                message: "✅ {{ result.stdout }}"
+
+      default:
+        - action: notify.send_message
+          target:
+            entity_id: notify.ВАШ_TELEGRAM
+          data:
+            message: >-
+              ⚠️ ПЭС: подача не прошла
+
+              {{ result.stdout if result.stdout else 'Код возврата ' ~ result.returncode }}
+
+              Лог: /config/SendToEIRC/eirc.log
+        - action: notify.mobile_app_ВАШ_ТЕЛЕФОН
+          data:
+            title: "⚠️ ПЭС: подача не прошла"
             message: >-
               {{ result.stdout if result.stdout else 'Код возврата ' ~ result.returncode }}
             data:
@@ -216,3 +295,11 @@ shell_command:
 #      В Telegram должно прийти сообщение с 🧪.
 #
 # 5. Только после этого включать боевую автоматизацию.
+#
+# 6. Для ПЭС дополнительно — разовый вход со вторым фактором.
+#    Из HA это сделать нельзя: код нужно вводить руками, поэтому
+#    через add-on «Advanced SSH & Web Terminal» или docker exec:
+#      cd /config/SendToEIRC && python3 pesc.py --setup
+#      python3 pesc.py --list      # покажет scaleId для config.json
+#      python3 pesc.py --dry-run   # проверка без отправки
+#    После этого shell_command.send_pesc работает без участия человека.

@@ -13,3 +13,7 @@ services:
       - ../config.json:/app/config.json:ro
       # cookies.pkl должен переживать перезапуск, поэтому не :ro
       - ./data:/app/data
+      # Токены ПЭС. Получить разово:
+      #   touch ../pesc_tokens.json
+      #   docker compose run --rm sendeirc python pesc.py --setup
+      - ../pesc_tokens.json:/app/pesc_tokens.json

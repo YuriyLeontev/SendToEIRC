@@ -11,10 +11,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY eirc.py waviot.py ./
+COPY eirc.py pesc.py waviot.py ./
 
-# С 1 по 25 число в 23:50; --days дублирует диапазон на случай сбоя расписания
-RUN echo '50 23 1-25 * * cd /app && python eirc.py --days 1-25 >> /var/log/eirc.log 2>&1' \
+# ЕИРЦ — с 1 по 25 число в 23:50; --days дублирует диапазон на случай сбоя
+# расписания. ПЭС — ежедневно пятью минутами раньше: кабинеты независимы,
+# ежедневный запуск сам себя чинит после сбоя сети, а открыт ли приём,
+# скрипт спрашивает у самого кабинета (reading/period).
+RUN printf '%s\n' \
+      '45 23 * * * cd /app && python pesc.py >> /var/log/eirc.log 2>&1' \
+      '50 23 1-25 * * cd /app && python eirc.py --days 1-25 >> /var/log/eirc.log 2>&1' \
       > /etc/cron.d/sendeirc \
     && chmod 0644 /etc/cron.d/sendeirc \
     && crontab /etc/cron.d/sendeirc \

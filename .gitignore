@@ -3,6 +3,7 @@ config.json
 .env
 cookies.pkl
 *.pkl
+pesc_tokens.json
 
 # Дампы страниц: содержат antiforgery-токены, номера ЛС и показания
 *.html
