@@ -528,6 +528,71 @@ python eirc.py --days 1-25
 Это и снимает описанную выше проблему «одна попытка в последний день» —
 неудачный вечер просто повторится завтра.
 
+## Ошибка сертификата
+
+Если подача падает так:
+
+```
+ОШИБКА ЕИРЦ: SSLError: HTTPSConnectionPool(host='id.epd47.ru', port=443): ...
+[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate
+```
+
+— дело не в скрипте и не в паролях. `id.epd47.ru` отдаёт только свой
+сертификат, без промежуточного GlobalSign, которым он подписан:
+
+```bash
+openssl s_client -connect id.epd47.ru:443 -servername id.epd47.ru </dev/null 2>/dev/null \
+  | openssl x509 -noout -text | grep "CA Issuers"
+#   CA Issuers - URI:http://secure.globalsign.com/cacert/gsgccr3dvtlsca2020.crt
+```
+
+Браузер такой сертификат догружает сам (AIA fetching), Python — нет. Пока
+промежуточный лежит в хранилище системы, всё работает; в контейнере Home
+Assistant его нет, и проверка цепочки обрывается.
+
+Лечится своим набором корней — certifi плюс тот самый промежуточный.
+Собирается один раз, рядом со скриптом:
+
+```bash
+cd /config/custom_components/SendToEIRC
+
+# 1. корни из certifi того интерпретатора, которым запускается скрипт
+docker exec homeassistant python3 -c "import certifi;print(open(certifi.where()).read())" > /tmp/ca-bundle.pem
+
+# 2. промежуточный GlobalSign, DER -> PEM
+curl -fsSL http://secure.globalsign.com/cacert/gsgccr3dvtlsca2020.crt \
+  | openssl x509 -inform DER >> /tmp/ca-bundle.pem
+
+sudo cp /tmp/ca-bundle.pem .
+
+# 3. проверка: должно быть ровно "Verify return code: 0 (ok)"
+openssl s_client -connect id.epd47.ru:443 -servername id.epd47.ru -CAfile ca-bundle.pem </dev/null 2>/dev/null \
+  | grep "Verify return code"
+```
+
+Файл с именем `ca-bundle.pem` рядом со скриптом (или в текущем каталоге)
+подхватывается сам — ни конфиг, ни команду запуска править не нужно. Он
+действует на все три клиента: ЕИРЦ, ПЭС и Waviot. Другое имя или другое
+место задаются полем `ca_bundle` в `config.json` (для ПЭС — либо то же поле
+верхнего уровня, либо своё внутри `pesc`) или переменной `EIRC_CA_BUNDLE`
+в `.env`. Если указанного файла нет, скрипт скажет об этом сразу, а не
+свалится посреди подачи.
+
+Проверить, что стало лучше, можно без подачи:
+
+```bash
+python eirc.py --net-check
+```
+
+В `.gitignore` файл добавлен намеренно: набор корней свой у каждой машины,
+и certifi в нём со временем устаревает. Когда GlobalSign сменит
+промежуточный или обновится certifi — пересоберите файл теми же тремя
+командами.
+
+**Чего делать не стоит:** отключать проверку (`verify=False`) или совать
+промежуточный сертификат в системное хранилище контейнера — при обновлении
+HA он оттуда пропадёт, и ошибка вернётся в самый неподходящий день.
+
 ## Запасной путь, если логин сломается
 
 Если вход по паролю перестанет работать (например, добавят капчу), куки можно
@@ -545,6 +610,7 @@ eirc.py                     авторизация в ЕИРЦ, парсинг �
 pesc.py                     JSON API Петроэлектросбыт, обход 2FA через verified
 waviot.py                   клиент Waviot, округление; работает и отдельно
 pesc_tokens.json            токены ПЭС, создаётся при --setup (в .gitignore)
+ca-bundle.pem               свой набор корней, если нужен (в .gitignore)
 deploy/crontab              строки для cron с пояснениями
 deploy/homeassistant.yaml   shell_command + автоматизация для HA
 deploy/Dockerfile           самодостаточный контейнер со своим cron

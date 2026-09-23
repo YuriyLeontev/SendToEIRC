@@ -97,13 +97,16 @@ def apply_rounding(value, mode=DEFAULT_ROUNDING):
 
 
 class WaviotClient:
-    def __init__(self, device_id, key, timeout=30):
+    def __init__(self, device_id, key, timeout=30, ca_bundle=None):
         if not device_id or not key:
             raise WaviotError(
                 "Не заданы WAVIOT_ID / WAVIOT_KEY — укажите их в .env")
         self.device_id = device_id
         self.key = key
         self.timeout = timeout
+        # Путь к своему набору корней либо True — штатный certifi.
+        # Подбирает eirc._ca_bundle(), см. комментарий там.
+        self.verify = ca_bundle or True
         self._cache = None
 
     def fetch(self, force=False):
@@ -111,7 +114,7 @@ class WaviotClient:
         if self._cache is not None and not force:
             return self._cache
         try:
-            r = requests.get(API_URL, timeout=self.timeout,
+            r = requests.get(API_URL, timeout=self.timeout, verify=self.verify,
                              params={"id": self.device_id, "key": self.key})
             r.raise_for_status()
             data = r.json()

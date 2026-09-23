@@ -46,7 +46,7 @@ from urllib.parse import quote
 
 import requests
 
-from eirc import _load_dotenv, _mount_retries, UA
+from eirc import EircError, _ca_bundle, _load_dotenv, _mount_retries, UA
 from waviot import (WaviotClient, WaviotError, apply_rounding,
                     DEFAULT_ROUNDING)
 
@@ -78,7 +78,8 @@ class PescAuthError(PescError):
 class PescClient:
     def __init__(self, login, password, base_url=DEFAULT_BASE,
                  customer=DEFAULT_CUSTOMER, login_type=DEFAULT_LOGIN_TYPE,
-                 token_file=DEFAULT_TOKEN_FILE, timeout=60, retries=3):
+                 token_file=DEFAULT_TOKEN_FILE, timeout=60, retries=3,
+                 ca_bundle=None):
         self.login_name = login
         self.password = password
         self.base_url = base_url.rstrip("/")
@@ -88,6 +89,8 @@ class PescClient:
         self.timeout = timeout
 
         self.s = requests.Session()
+        if ca_bundle:
+            self.s.verify = ca_bundle
         self.s.headers.update({
             "User-Agent": UA,
             "Accept": "application/json, text/plain, */*",
@@ -929,12 +932,21 @@ def main():
     login = os.environ.get("PESC_LOGIN") or pcfg.get("login")
     password = os.environ.get("PESC_PASSWORD") or pcfg.get("password")
 
+    try:
+        ca_bundle = _ca_bundle(pcfg.get("ca_bundle") or cfg.get("ca_bundle"))
+    except EircError as e:
+        log.error("%s", e)
+        if args.summary:
+            print("ОШИБКА ПЭС: %s" % e)
+        return 1
+
     wv = None
     wv_id = os.environ.get("WAVIOT_ID") or cfg.get("waviot_id")
     wv_key = os.environ.get("WAVIOT_KEY") or cfg.get("waviot_key")
     if wv_id and wv_key:
         wv = WaviotClient(wv_id, wv_key,
-                          timeout=args.timeout or pcfg.get("timeout") or 60)
+                          timeout=args.timeout or pcfg.get("timeout") or 60,
+                          ca_bundle=ca_bundle)
 
     if args.meter:
         if wv is None:
@@ -957,6 +969,7 @@ def main():
         token_file=pcfg.get("token_file", DEFAULT_TOKEN_FILE),
         timeout=timeout,
         retries=retries,
+        ca_bundle=ca_bundle,
     )
 
     if args.logout:

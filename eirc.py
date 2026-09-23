@@ -49,11 +49,59 @@ CHALLENGE_PATH = ("/ClientIdentity/Account/ExternalLogin"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Файл со своим набором корневых сертификатов: если лежит рядом со скриптом
+# (или в текущем каталоге), подхватывается сам, без правки конфига.
+CA_BUNDLE_NAME = "ca-bundle.pem"
+
 log = logging.getLogger("eirc")
 
 
 class EircError(RuntimeError):
     pass
+
+
+def _ca_bundle(configured=None):
+    """Какой набор корневых сертификатов подставить в requests.
+
+    id.epd47.ru отдаёт цепочку без промежуточного GlobalSign
+    (gsgccr3dvtlsca2020), и там, где его нет в локальном хранилище — в
+    контейнере Home Assistant его нет — проверка падает с
+
+        SSLError ... CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate
+
+    Лечится связкой certifi + промежуточный, один раз:
+
+        docker exec homeassistant python3 -c "import certifi;print(open(certifi.where()).read())" > ca-bundle.pem
+        curl -fsSL http://secure.globalsign.com/cacert/gsgccr3dvtlsca2020.crt \\
+          | openssl x509 -inform DER >> ca-bundle.pem
+        openssl s_client -connect id.epd47.ru:443 -servername id.epd47.ru \\
+          -CAfile ca-bundle.pem </dev/null 2>/dev/null | grep "Verify return code"
+
+    Порядок поиска: явный путь (ca_bundle в config.json или EIRC_CA_BUNDLE),
+    затем ca-bundle.pem рядом со скриптом и в текущем каталоге, иначе None —
+    штатный certifi.
+    """
+    explicit = configured or os.environ.get("EIRC_CA_BUNDLE")
+    if explicit:
+        path = os.path.abspath(os.path.expanduser(explicit))
+        if not os.path.exists(path):
+            raise EircError("Не найден набор сертификатов %s "
+                            "(ca_bundle в config.json / EIRC_CA_BUNDLE)" % path)
+        log.info("Сертификаты: %s", path)
+        return path
+
+    seen = []
+    for d in (SCRIPT_DIR, os.getcwd()):
+        path = os.path.join(d, CA_BUNDLE_NAME)
+        if path in seen:
+            continue
+        seen.append(path)
+        if os.path.exists(path):
+            log.info("Сертификаты: %s", path)
+            return path
+    return None
 
 
 def _mount_retries(session, retries=3, backoff=2.0):
@@ -83,13 +131,16 @@ def _mount_retries(session, retries=3, backoff=2.0):
 
 
 class EircClient:
-    def __init__(self, login, password, cookie_file=None, timeout=60, retries=3):
+    def __init__(self, login, password, cookie_file=None, timeout=60, retries=3,
+                 ca_bundle=None):
         self.login_name = login
         self.password = password
         self.cookie_file = cookie_file
         self.timeout = timeout
 
         self.s = requests.Session()
+        if ca_bundle:
+            self.s.verify = ca_bundle
         self.s.headers.update({
             "User-Agent": UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -639,22 +690,33 @@ def main():
 
     if args.net_check:
         timeout = args.timeout or 90
+        try:
+            ca = _ca_bundle()
+        except EircError as e:
+            log.error("%s", e)
+            return 1
         hosts = ("https://lk.epd47.ru/", "https://id.epd47.ru/",
                  "https://lk.waviot.ru/")
         worst = 0.0
         bad = False
+        ssl_bad = False
         for u in hosts:
             t0 = time.time()
             try:
-                r = requests.get(u, timeout=timeout,
+                r = requests.get(u, timeout=timeout, verify=ca or True,
                                  headers={"User-Agent": UA})
                 dt = time.time() - t0
                 worst = max(worst, dt)
                 print("%-26s %s  %.1f сек" % (u, r.status_code, dt))
             except requests.RequestException as e:
                 bad = True
+                ssl_bad = ssl_bad or isinstance(e, requests.exceptions.SSLError)
                 print("%-26s ОШИБКА %s  %.1f сек"
                       % (u, type(e).__name__, time.time() - t0))
+        if ssl_bad and not ca:
+            print("\nSSLError — не проверяется цепочка сертификатов. "
+                  "Положите рядом со скриптом ca-bundle.pem "
+                  "(certifi + промежуточный GlobalSign), см. README.")
         if bad:
             print("\nЕсть недоступные хосты — проверьте сеть и DNS сервера.")
             return 1
@@ -695,12 +757,21 @@ def main():
                   "в .env или в переменных окружения (см. .env.example)")
         return 1
 
+    try:
+        ca_bundle = _ca_bundle(cfg.get("ca_bundle"))
+    except EircError as e:
+        log.error("%s", e)
+        if args.summary:
+            print("ОШИБКА ЕИРЦ: %s" % e)
+        return 1
+
     wv = None
     wv_id = os.environ.get("WAVIOT_ID") or cfg.get("waviot_id")
     wv_key = os.environ.get("WAVIOT_KEY") or cfg.get("waviot_key")
     if wv_id and wv_key:
         wv = WaviotClient(wv_id, wv_key,
-                          timeout=args.timeout or cfg.get("timeout") or 60)
+                          timeout=args.timeout or cfg.get("timeout") or 60,
+                          ca_bundle=ca_bundle)
 
     if args.meter:
         if wv is None:
@@ -721,6 +792,7 @@ def main():
         cookie_file=cfg.get("cookie_file", "cookies.pkl"),
         timeout=timeout,
         retries=retries,
+        ca_bundle=ca_bundle,
     )
 
     try:

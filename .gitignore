@@ -20,6 +20,9 @@ env/
 .vscode/
 .idea/
 
+# Свой набор корневых сертификатов: он свой у каждой машины
+ca-bundle.pem
+
 # Прочее
 bash.exe.stackdump
 *.log
